@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from bson import ObjectId
+from urllib.parse import quote
 
 from database import db, create_document, get_documents
 from schemas import Story, Chapter
@@ -32,6 +33,7 @@ class GenerateRequest(BaseModel):
     characters: List[str] = Field(default_factory=list)
     chapters: int = Field(5, ge=1, le=15)
     save: bool = Field(True)
+    include_images: bool = Field(True, description="Whether to generate inline SVG illustrations")
 
 class GenerateResponse(BaseModel):
     system_prompt: str
@@ -58,6 +60,14 @@ def get_system_prompt():
 # This is a rule-based generator designed to work offline and free of API keys
 # while producing engaging multi-chapter stories.
 
+PALETTES = [
+    ("#f0abfc", "#60a5fa", "#c4b5fd"),
+    ("#fda4af", "#a78bfa", "#7dd3fc"),
+    ("#bef264", "#34d399", "#93c5fd"),
+    ("#fef08a", "#f472b6", "#93c5fd"),
+]
+
+
 def _make_chapter_title(title: str, idx: int, style: Optional[str], tone: Optional[str]) -> str:
     seeds = [
         "A New Beginning", "Whispers in the Wind", "The Hidden Path", "A Promise at Dawn",
@@ -69,8 +79,6 @@ def _make_chapter_title(title: str, idx: int, style: Optional[str], tone: Option
         base = f"{base} — {style.title()}"
     if tone:
         base = f"{base} ({tone.title()})"
-    if title:
-        return f"Chapter {idx}: {base}"
     return f"Chapter {idx}: {base}"
 
 
@@ -109,14 +117,96 @@ def _chapter_text(idx: int, total: int, theme: Optional[str], setting: Optional[
     return f"{intro} {beat}{dialogue}"
 
 
+def _initials(chars: List[str]) -> str:
+    if not chars:
+        return "★"
+    initials = [c.strip()[0].upper() for c in chars if c.strip()]
+    return "".join(initials[:3]) or "★"
+
+
+def _svg_data_url(svg: str) -> str:
+    return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
+
+
+def _chapter_image_svg(title: str, idx: int, total: int, prompt: str, chars: List[str]) -> str:
+    p = random.choice(PALETTES)
+    initials = _initials(chars)
+    svg = f"""
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='675' viewBox='0 0 1200 675'>
+  <defs>
+    <linearGradient id='g{idx}' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='{p[0]}'/>
+      <stop offset='50%' stop-color='{p[1]}'/>
+      <stop offset='100%' stop-color='{p[2]}'/>
+    </linearGradient>
+  </defs>
+  <rect width='1200' height='675' fill='url(#g{idx})' />
+  <g opacity='0.2'>
+    <circle cx='200' cy='200' r='140' fill='white'/>
+    <circle cx='1000' cy='140' r='110' fill='white'/>
+    <circle cx='900' cy='520' r='160' fill='white'/>
+  </g>
+  <text x='50%' y='48%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='800' font-size='140' fill='rgba(0,0,0,0.25)'>{initials}</text>
+  <text x='50%' y='75%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='700' font-size='36' fill='rgba(0,0,0,0.85)'>Chapter {idx} / {total}</text>
+  <text x='50%' y='84%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='600' font-size='28' fill='rgba(0,0,0,0.85)'>""".strip()
+    # Split long title lines
+    title_line = title.replace("Chapter ", "")
+    svg += title_line
+    svg += "</text>\n"
+    svg += f"<title>{prompt}</title>\n"
+    svg += "</svg>"
+    return _svg_data_url(svg)
+
+
+def _cover_image_svg(title: str, prompt: str, chars: List[str]) -> str:
+    p = random.choice(PALETTES)
+    initials = _initials(chars)
+    svg = f"""
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='1600' viewBox='0 0 1200 1600'>
+  <defs>
+    <linearGradient id='gcover' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='{p[0]}'/>
+      <stop offset='60%' stop-color='{p[1]}'/>
+      <stop offset='100%' stop-color='{p[2]}'/>
+    </linearGradient>
+  </defs>
+  <rect width='1200' height='1600' fill='url(#gcover)' />
+  <g opacity='0.15'>
+    <circle cx='300' cy='400' r='220' fill='white'/>
+    <circle cx='1000' cy='300' r='160' fill='white'/>
+    <circle cx='800' cy='1200' r='260' fill='white'/>
+  </g>
+  <text x='50%' y='45%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='900' font-size='220' fill='rgba(0,0,0,0.2)'>{initials}</text>
+  <text x='50%' y='68%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='800' font-size='64' fill='rgba(0,0,0,0.9)'>{title}</text>
+  <text x='50%' y='76%' dominant-baseline='middle' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='600' font-size='24' fill='rgba(0,0,0,0.85)'>An illustrated storybook</text>
+  <title>{prompt}</title>
+</svg>
+"""
+    return _svg_data_url(svg)
+
+
+def _image_prompt_for_chapter(idx: int, title: str, theme: Optional[str], setting: Optional[str], chars: List[str], style: Optional[str]) -> str:
+    who = ", ".join(chars[:3]) or "a small band of friends"
+    return (
+        f"Illustrate chapter {idx} titled '{title}'. Show {who} in {setting or 'a cozy imaginative setting'}, "
+        f"evoking {theme or 'wonder'} in a {style or 'storybook'} style. Soft lighting, warm colors, inclusive and kind."
+    )
+
+
 def generate_story(req: GenerateRequest) -> Story:
     chapters: List[Chapter] = []
     for i in range(1, req.chapters + 1):
+        c_title = _make_chapter_title(req.title, i, req.style, req.tone)
+        c_text = _chapter_text(i, req.chapters, req.theme, req.setting, req.audience, req.characters)
+        c_prompt = _image_prompt_for_chapter(i, c_title, req.theme, req.setting, req.characters, req.style)
+        c_svg = _chapter_image_svg(req.title, i, req.chapters, c_prompt, req.characters) if req.include_images else None
         chapters.append(
             Chapter(
                 index=i,
-                title=_make_chapter_title(req.title, i, req.style, req.tone),
-                text=_chapter_text(i, req.chapters, req.theme, req.setting, req.audience, req.characters),
+                title=c_title,
+                text=c_text,
+                image_prompt=c_prompt if req.include_images else None,
+                image_svg=c_svg,
             )
         )
     cover_prompt = (
@@ -124,6 +214,7 @@ def generate_story(req: GenerateRequest) -> Story:
         f"Theme: {req.theme or 'wonder'}. Setting: {req.setting or 'imaginative landscape'}. "
         f"Characters: {', '.join(req.characters) or 'a group of friends'}."
     )
+    cover_svg = _cover_image_svg(req.title, cover_prompt, req.characters) if req.include_images else None
     story = Story(
         title=req.title,
         theme=req.theme,
@@ -136,7 +227,8 @@ def generate_story(req: GenerateRequest) -> Story:
         characters=req.characters,
         chapters=chapters,
         cover_prompt=cover_prompt,
-        generator_version="1.0-local",
+        cover_image_svg=cover_svg,
+        generator_version="1.1-local-images",
     )
     return story
 

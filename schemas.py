@@ -11,6 +11,8 @@ class Chapter(BaseModel):
     index: int = Field(..., ge=1, description="Chapter number starting at 1")
     title: str = Field(..., description="Chapter title")
     text: str = Field(..., description="Chapter content text")
+    image_prompt: Optional[str] = Field(None, description="Prompt describing the illustration for this chapter")
+    image_svg: Optional[str] = Field(None, description="Inline SVG data URL representing the chapter illustration")
 
 class Story(BaseModel):
     title: str = Field(..., description="Story title")
@@ -24,4 +26,5 @@ class Story(BaseModel):
     characters: List[str] = Field(default_factory=list, description="Key character names")
     chapters: List[Chapter] = Field(default_factory=list, description="List of chapters")
     cover_prompt: Optional[str] = Field(None, description="Prompt for cover art generation (optional)")
-    generator_version: str = Field("1.0", description="Local generator version tag")
+    cover_image_svg: Optional[str] = Field(None, description="Inline SVG data URL for cover art")
+    generator_version: str = Field("1.1-images-local", description="Local generator version tag")
